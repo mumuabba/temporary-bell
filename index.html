@@ -347,9 +347,9 @@ function customSentence(n){
 /* ── 소리 열기 (아이폰은 첫 터치에서 열어야 한다) ── */
 var ctx = null, unlocked = false;
 function unlock(){
+  try{ ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === 'suspended') ctx.resume(); }catch(e){}
   if (unlocked) return;
   unlocked = true;
-  try{ ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === 'suspended') ctx.resume(); }catch(e){}
   try{ var u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); }catch(e){}
 }
 document.addEventListener('touchstart', unlock, true);
@@ -378,20 +378,90 @@ function chime(v){
   });
 }
 
-/* 선히 녹음 재생 (없으면 실패로 넘겨 아이폰 목소리로 폴백) */
+/* 선히 녹음 재생.
+   아이폰은 <audio> 태그로 소리를 내면 틀어놓은 음악을 아예 멈춰 버린다.
+   Web Audio 로 재생하면 음악이 안 끊기거나 잠깐 작아지는 정도로 끝나는 경우가 많아
+   이 방식을 먼저 쓰고, 안 되면 <audio> 로 되돌린다. */
+var bufCache = {};
+function loadBuffer(url, ok, fail){
+  if (bufCache[url]){ ok(bufCache[url]); return; }
+  var settled = false;
+  var okOnce = function (b){ if (!settled){ settled = true; ok(b); } };
+  var failOnce = function (){ if (!settled){ settled = true; fail(); } };
+  // 어떤 기기에서는 디코딩이 응답 없이 멈출 수 있다. 그때는 일반 재생으로 넘긴다.
+  setTimeout(failOnce, 2500);
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', url, true);
+  xhr.responseType = 'arraybuffer';
+  xhr.onload = function (){
+    if (xhr.status !== 200){ failOnce(); return; }
+    try{
+      var p = ctx.decodeAudioData(xhr.response,
+        function (buf){ bufCache[url] = buf; okOnce(buf); },
+        function (){ failOnce(); });
+      if (p && p.then) p.then(function (buf){ bufCache[url] = buf; okOnce(buf); }, failOnce);
+    }catch(e){ failOnce(); }
+  };
+  xhr.onerror = failOnce;
+  try{ xhr.send(); }catch(e){ failOnce(); }
+}
+function playClipWA(key, n){
+  return new Promise(function (resolve, reject){
+    try{
+      ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+      if (ctx.state === 'suspended') ctx.resume();
+    }catch(e){ reject(new Error('no ctx')); return; }
+    var url = 'voice/' + key + '/' + n + '.mp3';
+    loadBuffer(url, function (buf){
+      try{
+        var s = ctx.createBufferSource(), g = ctx.createGain();
+        s.buffer = buf;
+        g.gain.value = Number($vol.value);
+        try{ s.playbackRate.value = Number($rate.value); }catch(e){}
+        s.connect(g); g.connect(ctx.destination);
+        var done = false, fin = function (){ if (!done){ done = true; resolve(); } };
+        s.onended = fin;
+        s.start(0);
+        setTimeout(fin, (buf.duration / Math.max(0.5, Number($rate.value))) * 1000 + 900);
+      }catch(e){ reject(e); }
+    }, function (){ reject(new Error('decode fail')); });
+  });
+}
 var clipCache = {};
-function playClip(key, n){
+function playClipTag(key, n){
   return new Promise(function (resolve, reject){
     var src = 'voice/' + key + '/' + n + '.mp3';
     var a = clipCache[src] || (clipCache[src] = new Audio(src));
     try{ a.pause(); a.currentTime = 0; }catch(e){}
     a.volume = Number($vol.value);
     try{ a.preservesPitch = true; a.playbackRate = Number($rate.value); }catch(e){}
-    a.onended = function (){ resolve(); };
-    a.onerror = function (){ reject(new Error('no clip')); };
+    var settled = false;
+    var fin = function (){ if (!settled){ settled = true; resolve(); } };
+    var bad = function (){ if (!settled){ settled = true; reject(new Error('no clip')); } };
+    a.onended = fin;
+    a.onerror = bad;
+    // 길이를 알게 되면 그 길이에 맞춰 상한을 좁힌다
+    a.onloadedmetadata = function (){
+      if (a.duration && isFinite(a.duration)){
+        setTimeout(fin, (a.duration / Math.max(0.5, Number($rate.value))) * 1000 + 1500);
+      }
+    };
     var p = a.play();
-    if (p && p.catch) p.catch(reject);
+    if (p && p.catch) p.catch(bad);
+    setTimeout(fin, 12000);   // 어떤 경우에도 호출이 멈춰 있지 않게
   });
+}
+function playClip(key, n){
+  return playClipWA(key, n).catch(function (){ return playClipTag(key, n); });
+}
+
+/* 방송이 끝나면 소리 채널을 놓아준다 (음악이 다시 살아나도록) */
+var releaseTimer = null;
+function releaseAudioSoon(){
+  clearTimeout(releaseTimer);
+  releaseTimer = setTimeout(function (){
+    try{ if (ctx && !busy && ctx.state === 'running' && ctx.suspend) ctx.suspend(); }catch(e){}
+  }, 1500);
 }
 function speak(text){
   return new Promise(function (res){
@@ -465,6 +535,7 @@ function call(n){
     buf = ''; render();
     setBusy(false);
     busy = false;
+    releaseAudioSoon();
   };
   var go = function (){ step(); };
   if ($chime.checked) chime(Number($vol.value)).then(go); else go();
