@@ -218,7 +218,7 @@
     </div>
     <div class="check">
       <input type="checkbox" id="use-clip">
-      <label for="use-clip">선히 목소리로 (켜면 더 자연스럽지만, 틀어놓은 음악이 멈춰요)</label>
+      <label for="use-clip">선히 목소리로 (음악은 계속 나오지만 소리가 조금 작아요)</label>
     </div>
     <div class="btn-row">
       <button id="btn-test">미리 듣기</button>
@@ -384,29 +384,57 @@ function chime(v){
   });
 }
 
-/* 선히 녹음 재생 (<audio>). 이 방식은 틀어놓은 음악을 멈추므로, 선히 목소리를 켰을 때만 쓴다. */
-var clipCache = {};
-function playClipTag(key, n){
+/* 선히 녹음 재생 (Web Audio).
+   이 방식은 틀어놓은 음악을 멈추지 않고 그 위에 얹어 낸다. (다만 아이폰이 웹 소리를 눌러 조금 작다)
+   실패하면 아이폰 목소리로 넘겨 소리는 반드시 나게 한다. */
+var bufCache = {};
+function loadBuffer(url, ok, fail){
+  if (bufCache[url]){ ok(bufCache[url]); return; }
+  var settled = false;
+  var okOnce = function (b){ if (!settled){ settled = true; ok(b); } };
+  var failOnce = function (){ if (!settled){ settled = true; fail(); } };
+  setTimeout(failOnce, 2500);   // 어떤 기기는 디코딩이 응답 없이 멈춘다 → 폴백
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', url, true);
+  xhr.responseType = 'arraybuffer';
+  xhr.onload = function (){
+    if (xhr.status !== 200){ failOnce(); return; }
+    try{
+      var p = ctx.decodeAudioData(xhr.response,
+        function (b){ bufCache[url] = b; okOnce(b); },
+        function (){ failOnce(); });
+      if (p && p.then) p.then(function (b){ bufCache[url] = b; okOnce(b); }, failOnce);
+    }catch(e){ failOnce(); }
+  };
+  xhr.onerror = failOnce;
+  try{ xhr.send(); }catch(e){ failOnce(); }
+}
+function ensureRunning(cb){
+  try{ ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); }catch(e){ cb(); return; }
+  if (ctx.state === 'running'){ cb(); return; }
+  var called = false, go = function (){ if (!called){ called = true; cb(); } };
+  try{ var p = ctx.resume(); if (p && p.then) p.then(go, go); }catch(e){}
+  setTimeout(go, 350);
+}
+function playClipWA(key, n){
   return new Promise(function (resolve, reject){
-    var src = 'voice/' + key + '/' + n + '.mp3';
-    var a = clipCache[src] || (clipCache[src] = new Audio(src));
-    try{ a.pause(); a.currentTime = 0; }catch(e){}
-    a.volume = Number($vol.value);
-    try{ a.preservesPitch = true; a.playbackRate = Number($rate.value); }catch(e){}
-    var settled = false;
-    var fin = function (){ if (!settled){ settled = true; resolve(); } };
-    var bad = function (){ if (!settled){ settled = true; reject(new Error('no clip')); } };
-    a.onended = fin;
-    a.onerror = bad;
-    // 길이를 알게 되면 그 길이에 맞춰 상한을 좁힌다
-    a.onloadedmetadata = function (){
-      if (a.duration && isFinite(a.duration)){
-        setTimeout(fin, (a.duration / Math.max(0.5, Number($rate.value))) * 1000 + 1500);
-      }
-    };
-    var p = a.play();
-    if (p && p.catch) p.catch(bad);
-    setTimeout(fin, 12000);   // 어떤 경우에도 호출이 멈춰 있지 않게
+    ensureRunning(function (){
+      if (!ctx){ reject(new Error('no ctx')); return; }
+      loadBuffer('voice/' + key + '/' + n + '.mp3', function (buf){
+        try{
+          var s = ctx.createBufferSource(), g = ctx.createGain(), comp = ctx.createDynamicsCompressor();
+          s.buffer = buf;
+          g.gain.value = Math.min(7, Number($vol.value) * 5);   // 음악과 섞이면 눌리므로 세게 키움
+          try{ comp.threshold.value = -14; comp.knee.value = 0; comp.ratio.value = 20; comp.attack.value = 0.001; comp.release.value = 0.12; }catch(e){}
+          try{ s.playbackRate.value = Number($rate.value); }catch(e){}
+          s.connect(g); g.connect(comp); comp.connect(ctx.destination);
+          var done = false, fin = function (){ if (!done){ done = true; resolve(); } };
+          s.onended = fin;
+          s.start(0);
+          setTimeout(fin, (buf.duration / Math.max(0.5, Number($rate.value))) * 1000 + 900);
+        }catch(e){ reject(e); }
+      }, function (){ reject(new Error('decode fail')); });
+    });
   });
 }
 function speak(text){
@@ -435,7 +463,7 @@ function sayOnce(n){
   var preset = isCustom() ? null : PRESETS[+$preset.value];
   var text = preset ? customFromPreset(preset, n) : customSentence(n);
   if ($useClip && $useClip.checked && preset && +n >= 1 && +n <= CLIP_MAX){
-    return playClipTag(preset.key, n).catch(function (){ return speak(text); });
+    return playClipWA(preset.key, n).catch(function (){ return speak(text); });
   }
   return speak(text);
 }
