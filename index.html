@@ -216,6 +216,10 @@
       <input type="checkbox" id="twice">
       <label for="twice">두 번 반복</label>
     </div>
+    <div class="check">
+      <input type="checkbox" id="mix" checked>
+      <label for="mix">틀어놓은 음악 안 끊기게 (끄면 더 또렷하지만 음악이 잠깐 멈춰요)</label>
+    </div>
     <div class="btn-row">
       <button id="btn-test">미리 듣기</button>
       <button id="btn-close">닫기</button>
@@ -248,7 +252,7 @@ var $num = el('num'), $status = el('status'), $board = el('board'),
     $voice = el('voice'), $voiceRow = el('voice-row'),
     $rate = el('rate'), $rateOut = el('rate-out'),
     $vol = el('vol'), $volOut = el('vol-out'),
-    $chime = el('chime'), $twice = el('twice'), $tip = el('tip');
+    $chime = el('chime'), $twice = el('twice'), $mix = el('mix'), $tip = el('tip');
 
 /* ── 문구 목록 채우기 ─────────────────── */
 function labelOf(tpl){ return tpl.indexOf('{번호}') > -1 ? tpl.split('{번호}').join('○') : '○번 ' + tpl; }
@@ -273,6 +277,7 @@ if (saved.rate != null) $rate.value = saved.rate;
 if (saved.vol != null) $vol.value = saved.vol;
 if (saved.chime != null) $chime.checked = saved.chime;
 if (saved.twice != null) $twice.checked = saved.twice;
+if (saved.mix != null) $mix.checked = saved.mix;
 syncMode();
 syncOut();
 
@@ -280,7 +285,7 @@ function persist(){
   store.save({
     sel: $preset.value, customTpl: $tpl.value,
     rate: $rate.value, vol: $vol.value,
-    chime: $chime.checked, twice: $twice.checked, voice: $voice.value
+    chime: $chime.checked, twice: $twice.checked, mix: $mix.checked, voice: $voice.value
   });
 }
 function syncOut(){
@@ -299,6 +304,7 @@ $rate.addEventListener('input', function (){ syncOut(); persist(); });
 $vol.addEventListener('input', function (){ syncOut(); persist(); });
 $chime.addEventListener('change', persist);
 $twice.addEventListener('change', persist);
+$mix.addEventListener('change', persist);
 $voice.addEventListener('change', persist);
 
 /* ── 아이폰 기본 목소리 (직접 입력용) ── */
@@ -405,26 +411,40 @@ function loadBuffer(url, ok, fail){
   xhr.onerror = failOnce;
   try{ xhr.send(); }catch(e){ failOnce(); }
 }
+/* AudioContext 가 실제로 돌아갈 때까지 기다린다 (음악과 섞이면 iOS가 자주 재워버린다) */
+function ensureRunning(cb){
+  try{
+    ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+  }catch(e){ cb(); return; }
+  if (ctx.state === 'running'){ cb(); return; }
+  var called = false, go = function (){ if (!called){ called = true; cb(); } };
+  try{
+    var p = ctx.resume();
+    if (p && p.then) p.then(go, go);
+  }catch(e){}
+  setTimeout(go, 350);
+}
 function playClipWA(key, n){
   return new Promise(function (resolve, reject){
-    try{
-      ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
-      if (ctx.state === 'suspended') ctx.resume();
-    }catch(e){ reject(new Error('no ctx')); return; }
-    var url = 'voice/' + key + '/' + n + '.mp3';
-    loadBuffer(url, function (buf){
-      try{
-        var s = ctx.createBufferSource(), g = ctx.createGain();
-        s.buffer = buf;
-        g.gain.value = Number($vol.value);
-        try{ s.playbackRate.value = Number($rate.value); }catch(e){}
-        s.connect(g); g.connect(ctx.destination);
-        var done = false, fin = function (){ if (!done){ done = true; resolve(); } };
-        s.onended = fin;
-        s.start(0);
-        setTimeout(fin, (buf.duration / Math.max(0.5, Number($rate.value))) * 1000 + 900);
-      }catch(e){ reject(e); }
-    }, function (){ reject(new Error('decode fail')); });
+    ensureRunning(function (){
+      if (!ctx){ reject(new Error('no ctx')); return; }
+      var url = 'voice/' + key + '/' + n + '.mp3';
+      loadBuffer(url, function (buf){
+        try{
+          var s = ctx.createBufferSource(), g = ctx.createGain(), comp = ctx.createDynamicsCompressor();
+          s.buffer = buf;
+          // 음악과 섞이면 iOS가 웹 소리를 눌러 작아지므로 키우고, 압축기로 찌그러짐을 막는다
+          g.gain.value = Math.min(3, Number($vol.value) * 2.4);
+          try{ comp.threshold.value = -8; comp.ratio.value = 12; comp.attack.value = 0.003; comp.release.value = 0.25; }catch(e){}
+          try{ s.playbackRate.value = Number($rate.value); }catch(e){}
+          s.connect(g); g.connect(comp); comp.connect(ctx.destination);
+          var done = false, fin = function (){ if (!done){ done = true; resolve(); } };
+          s.onended = fin;
+          s.start(0);
+          setTimeout(fin, (buf.duration / Math.max(0.5, Number($rate.value))) * 1000 + 900);
+        }catch(e){ reject(e); }
+      }, function (){ reject(new Error('decode fail')); });
+    });
   });
 }
 var clipCache = {};
@@ -452,16 +472,9 @@ function playClipTag(key, n){
   });
 }
 function playClip(key, n){
-  return playClipWA(key, n).catch(function (){ return playClipTag(key, n); });
-}
-
-/* 방송이 끝나면 소리 채널을 놓아준다 (음악이 다시 살아나도록) */
-var releaseTimer = null;
-function releaseAudioSoon(){
-  clearTimeout(releaseTimer);
-  releaseTimer = setTimeout(function (){
-    try{ if (ctx && !busy && ctx.state === 'running' && ctx.suspend) ctx.suspend(); }catch(e){}
-  }, 1500);
+  // "음악 안 끊기게" 모드면 Web Audio(섞임), 아니면 또렷한 일반 재생(음악 잠깐 멈춤)
+  if ($mix && $mix.checked) return playClipWA(key, n).catch(function (){ return playClipTag(key, n); });
+  return playClipTag(key, n).catch(function (){ return playClipWA(key, n); });
 }
 function speak(text){
   return new Promise(function (res){
@@ -535,7 +548,6 @@ function call(n){
     buf = ''; render();
     setBusy(false);
     busy = false;
-    releaseAudioSoon();
   };
   var go = function (){ step(); };
   if ($chime.checked) chime(Number($vol.value)).then(go); else go();
