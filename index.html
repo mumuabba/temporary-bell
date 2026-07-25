@@ -187,7 +187,7 @@
       <select id="preset"></select>
     </div>
     <div class="row" id="custom-row" style="display:none">
-      <label for="tpl">직접 입력 — 번호는 문장 앞에 붙습니다 (아이폰 기본 목소리로 나갑니다)</label>
+      <label for="tpl">직접 입력 — 번호는 문장 앞에 붙습니다</label>
       <input type="text" id="tpl" autocomplete="off" autocapitalize="off">
     </div>
     <div class="row" id="voice-row">
@@ -217,8 +217,8 @@
       <label for="twice">두 번 반복</label>
     </div>
     <div class="check">
-      <input type="checkbox" id="mix" checked>
-      <label for="mix">틀어놓은 음악 안 끊기게 — 켜두세요 (끄면 소리는 또렷하지만 음악이 멈춰서 다시 틀어야 해요)</label>
+      <input type="checkbox" id="use-clip">
+      <label for="use-clip">선히 목소리로 (켜면 더 자연스럽지만, 틀어놓은 음악이 멈춰요)</label>
     </div>
     <div class="btn-row">
       <button id="btn-test">미리 듣기</button>
@@ -252,7 +252,7 @@ var $num = el('num'), $status = el('status'), $board = el('board'),
     $voice = el('voice'), $voiceRow = el('voice-row'),
     $rate = el('rate'), $rateOut = el('rate-out'),
     $vol = el('vol'), $volOut = el('vol-out'),
-    $chime = el('chime'), $twice = el('twice'), $mix = el('mix'), $tip = el('tip');
+    $chime = el('chime'), $twice = el('twice'), $useClip = el('use-clip'), $tip = el('tip');
 
 /* ── 문구 목록 채우기 ─────────────────── */
 function labelOf(tpl){ return tpl.indexOf('{번호}') > -1 ? tpl.split('{번호}').join('○') : '○번 ' + tpl; }
@@ -277,7 +277,7 @@ if (saved.rate != null) $rate.value = saved.rate;
 if (saved.vol != null) $vol.value = saved.vol;
 if (saved.chime != null) $chime.checked = saved.chime;
 if (saved.twice != null) $twice.checked = saved.twice;
-if (saved.mix != null) $mix.checked = saved.mix;
+if (saved.useClip != null) $useClip.checked = saved.useClip;
 syncMode();
 syncOut();
 
@@ -285,7 +285,7 @@ function persist(){
   store.save({
     sel: $preset.value, customTpl: $tpl.value,
     rate: $rate.value, vol: $vol.value,
-    chime: $chime.checked, twice: $twice.checked, mix: $mix.checked, voice: $voice.value
+    chime: $chime.checked, twice: $twice.checked, useClip: $useClip.checked, voice: $voice.value
   });
 }
 function syncOut(){
@@ -293,10 +293,10 @@ function syncOut(){
   $volOut.textContent = Math.round($vol.value * 100) + '%';
 }
 function isCustom(){ return $preset.value === 'custom'; }
+function usingTTS(){ return isCustom() || !$useClip.checked; }
 function syncMode(){
-  var c = isCustom();
-  $customRow.style.display = c ? 'block' : 'none';
-  $voiceRow.className = c ? 'show' : '';
+  $customRow.style.display = isCustom() ? 'block' : 'none';
+  $voiceRow.className = usingTTS() ? 'show' : '';   // 아이폰 목소리를 쓸 때만 목소리 선택 노출
 }
 $preset.addEventListener('change', function (){ syncMode(); persist(); });
 $tpl.addEventListener('input', persist);
@@ -304,7 +304,7 @@ $rate.addEventListener('input', function (){ syncOut(); persist(); });
 $vol.addEventListener('input', function (){ syncOut(); persist(); });
 $chime.addEventListener('change', persist);
 $twice.addEventListener('change', persist);
-$mix.addEventListener('change', persist);
+$useClip.addEventListener('change', function (){ syncMode(); persist(); });
 $voice.addEventListener('change', persist);
 
 /* ── 아이폰 기본 목소리 (직접 입력용) ── */
@@ -384,69 +384,7 @@ function chime(v){
   });
 }
 
-/* 선히 녹음 재생.
-   아이폰은 <audio> 태그로 소리를 내면 틀어놓은 음악을 아예 멈춰 버린다.
-   Web Audio 로 재생하면 음악이 안 끊기거나 잠깐 작아지는 정도로 끝나는 경우가 많아
-   이 방식을 먼저 쓰고, 안 되면 <audio> 로 되돌린다. */
-var bufCache = {};
-function loadBuffer(url, ok, fail){
-  if (bufCache[url]){ ok(bufCache[url]); return; }
-  var settled = false;
-  var okOnce = function (b){ if (!settled){ settled = true; ok(b); } };
-  var failOnce = function (){ if (!settled){ settled = true; fail(); } };
-  // 어떤 기기에서는 디코딩이 응답 없이 멈출 수 있다. 그때는 일반 재생으로 넘긴다.
-  setTimeout(failOnce, 2500);
-  var xhr = new XMLHttpRequest();
-  xhr.open('GET', url, true);
-  xhr.responseType = 'arraybuffer';
-  xhr.onload = function (){
-    if (xhr.status !== 200){ failOnce(); return; }
-    try{
-      var p = ctx.decodeAudioData(xhr.response,
-        function (buf){ bufCache[url] = buf; okOnce(buf); },
-        function (){ failOnce(); });
-      if (p && p.then) p.then(function (buf){ bufCache[url] = buf; okOnce(buf); }, failOnce);
-    }catch(e){ failOnce(); }
-  };
-  xhr.onerror = failOnce;
-  try{ xhr.send(); }catch(e){ failOnce(); }
-}
-/* AudioContext 가 실제로 돌아갈 때까지 기다린다 (음악과 섞이면 iOS가 자주 재워버린다) */
-function ensureRunning(cb){
-  try{
-    ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
-  }catch(e){ cb(); return; }
-  if (ctx.state === 'running'){ cb(); return; }
-  var called = false, go = function (){ if (!called){ called = true; cb(); } };
-  try{
-    var p = ctx.resume();
-    if (p && p.then) p.then(go, go);
-  }catch(e){}
-  setTimeout(go, 350);
-}
-function playClipWA(key, n){
-  return new Promise(function (resolve, reject){
-    ensureRunning(function (){
-      if (!ctx){ reject(new Error('no ctx')); return; }
-      var url = 'voice/' + key + '/' + n + '.mp3';
-      loadBuffer(url, function (buf){
-        try{
-          var s = ctx.createBufferSource(), g = ctx.createGain(), comp = ctx.createDynamicsCompressor();
-          s.buffer = buf;
-          // 음악과 섞이면 iOS가 웹 소리를 눌러 작아지므로 키우고, 압축기로 찌그러짐을 막는다
-          g.gain.value = Math.min(3, Number($vol.value) * 2.4);
-          try{ comp.threshold.value = -8; comp.ratio.value = 12; comp.attack.value = 0.003; comp.release.value = 0.25; }catch(e){}
-          try{ s.playbackRate.value = Number($rate.value); }catch(e){}
-          s.connect(g); g.connect(comp); comp.connect(ctx.destination);
-          var done = false, fin = function (){ if (!done){ done = true; resolve(); } };
-          s.onended = fin;
-          s.start(0);
-          setTimeout(fin, (buf.duration / Math.max(0.5, Number($rate.value))) * 1000 + 900);
-        }catch(e){ reject(e); }
-      }, function (){ reject(new Error('decode fail')); });
-    });
-  });
-}
+/* 선히 녹음 재생 (<audio>). 이 방식은 틀어놓은 음악을 멈추므로, 선히 목소리를 켰을 때만 쓴다. */
 var clipCache = {};
 function playClipTag(key, n){
   return new Promise(function (resolve, reject){
@@ -471,11 +409,6 @@ function playClipTag(key, n){
     setTimeout(fin, 12000);   // 어떤 경우에도 호출이 멈춰 있지 않게
   });
 }
-function playClip(key, n){
-  // "음악 안 끊기게" 모드면 Web Audio(섞임), 아니면 또렷한 일반 재생(음악 잠깐 멈춤)
-  if ($mix && $mix.checked) return playClipWA(key, n).catch(function (){ return playClipTag(key, n); });
-  return playClipTag(key, n).catch(function (){ return playClipWA(key, n); });
-}
 function speak(text){
   return new Promise(function (res){
     var done = false, fin = function (){ if (!done){ done = true; res(); } };
@@ -495,16 +428,16 @@ function speak(text){
   });
 }
 
-/* 한 번 말하기: 선히 녹음이 있으면 그걸, 아니면 아이폰 목소리 */
+/* 한 번 말하기.
+   기본은 아이폰 목소리(TTS) — 이 방식일 때만 아이폰이 음악을 자동으로 살짝 줄였다 되돌린다.
+   "선히 목소리"를 켜면 선히 녹음을 쓰지만, 그때는 음악이 멈춘다. */
 function sayOnce(n){
-  if (!isCustom()){
-    var preset = PRESETS[+$preset.value];
-    if (preset && +n >= 1 && +n <= CLIP_MAX){
-      return playClip(preset.key, n).catch(function (){ return speak(customFromPreset(preset, n)); });
-    }
-    return speak(customFromPreset(preset, n));
+  var preset = isCustom() ? null : PRESETS[+$preset.value];
+  var text = preset ? customFromPreset(preset, n) : customSentence(n);
+  if ($useClip && $useClip.checked && preset && +n >= 1 && +n <= CLIP_MAX){
+    return playClipTag(preset.key, n).catch(function (){ return speak(text); });
   }
-  return speak(customSentence(n));
+  return speak(text);
 }
 function customFromPreset(preset, n){
   var t = preset ? preset.tpl : '고객님, 음료 나왔습니다.';
