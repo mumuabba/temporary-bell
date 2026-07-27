@@ -218,7 +218,7 @@
     </div>
     <div class="check">
       <input type="checkbox" id="use-clip">
-      <label for="use-clip">선히 목소리로 (음악은 계속 나오지만 소리가 조금 작아요)</label>
+      <label for="use-clip">선히 목소리로 (블루투스 스피커를 쓸 때 이걸 켜세요)</label>
     </div>
     <div class="btn-row">
       <button id="btn-test">미리 듣기</button>
@@ -457,13 +457,27 @@ function speak(text){
 }
 
 /* 한 번 말하기.
-   기본은 아이폰 목소리(TTS) — 이 방식일 때만 아이폰이 음악을 자동으로 살짝 줄였다 되돌린다.
-   "선히 목소리"를 켜면 선히 녹음을 쓰지만, 그때는 음악이 멈춘다. */
+   기본은 아이폰 목소리(TTS) — 아이폰이 음악을 자동으로 살짝 줄였다 되돌린다.
+   단 아이폰은 블루투스 스피커가 연결돼 있어도 TTS만은 본체 스피커로 낸다(iOS 결함, 웹에서 못 고침).
+   "선히 목소리"를 켜면 선히 녹음을 차임벨과 같은 경로(Web Audio)로 재생해 블루투스로 나가고,
+   동시에 무음(볼륨 0) TTS를 함께 돌려 iOS의 음악 자동 줄임(duck)도 걸리게 시도한다. */
+function silentDuck(text){
+  try{
+    var u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ko-KR';
+    u.rate = Number($rate.value);   // 길이를 선히 녹음과 비슷하게 맞춘다
+    u.volume = 0;                   // 소리는 선히가 내고, 이건 음악 줄임 유발용
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  }catch(e){}
+}
 function sayOnce(n){
   var preset = isCustom() ? null : PRESETS[+$preset.value];
   var text = preset ? customFromPreset(preset, n) : customSentence(n);
   if ($useClip && $useClip.checked && preset && +n >= 1 && +n <= CLIP_MAX){
-    return playClipWA(preset.key, n).catch(function (){ return speak(text); });
+    silentDuck(text);
+    return playClipWA(preset.key, n).then(
+      function (){ try{ speechSynthesis.cancel(); }catch(e){} },
+      function (){ return speak(text); });
   }
   return speak(text);
 }
